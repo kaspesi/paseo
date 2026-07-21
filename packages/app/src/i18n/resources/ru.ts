@@ -177,6 +177,8 @@ export const ru: TranslationResources = {
   agentStream: {
     empty: "Начните общаться с этим агентом...",
     scrollToBottom: "Прокрутить вниз",
+    scrollToPreviousPrompt: "Прокрутить к предыдущему запросу",
+    scrollToNextPrompt: "Прокрутить к следующему запросу",
     permission: {
       plan: "План",
       required: "Требуется разрешение",

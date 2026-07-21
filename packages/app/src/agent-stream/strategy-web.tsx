@@ -10,9 +10,16 @@ import React, {
 } from "react";
 import { ActivityIndicator } from "react-native";
 import { measureElement as measureVirtualElement, useVirtualizer } from "@tanstack/react-virtual";
+import { useStableEvent } from "@/hooks/use-stable-event";
 import { estimateStreamItemHeight } from "./web-virtualization";
 import type { StreamRenderInput, StreamStrategy, StreamViewportHandle } from "./strategy";
 import { createStreamStrategy } from "./strategy";
+import {
+  PROMPT_ANCHOR_ATTRIBUTE,
+  resolvePromptScrollTarget,
+  type PromptAnchorOffset,
+  type PromptScrollDirection,
+} from "./prompt-anchor";
 
 interface CreateWebStreamStrategyInput {
   isMobileBreakpoint: boolean;
@@ -25,6 +32,11 @@ const USER_SCROLL_DELTA_EPSILON = 1;
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 64;
 const AUTO_SCROLL_RESUME_THRESHOLD_PX = 1;
 const HISTORY_START_THRESHOLD_PX = 96;
+// A scroll into virtualized history first lands on the virtualizer's estimate for
+// the target row. Each pass re-measures once the row has mounted and corrects the
+// remaining drift; three passes are enough for the scroll -> render -> measure
+// round trip to settle.
+const PROMPT_ANCHOR_CORRECTION_PASSES = 3;
 
 const historyStartSlotStyle: CSSProperties = {
   display: "flex",
@@ -91,12 +103,29 @@ function isScrollContainerOverscrolledPastBottom(
   return getScrollContainerDistanceFromBottom(scrollContainer) < 0;
 }
 
+function getOffsetWithinScrollContainer(input: {
+  scrollContainer: HTMLElement;
+  containerTop: number;
+  node: Element;
+}): number {
+  return (
+    input.node.getBoundingClientRect().top - input.containerTop + input.scrollContainer.scrollTop
+  );
+}
+
+interface MeasuredPromptAnchorOffset extends PromptAnchorOffset {
+  // False when the anchor row is outside the virtualizer's window and the offset
+  // came from the virtualizer's estimate instead of a mounted DOM node.
+  isMeasured: boolean;
+}
+
 function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: boolean }) {
   const {
     segments,
     liveHeadRowRevision,
     boundary,
     renderers,
+    promptAnchorIds,
     listEmptyComponent,
     viewportRef,
     routeBottomAnchorRequest,
@@ -110,11 +139,15 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
   } = props;
   const scrollContainerRef = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLElement | null>(null);
+  const virtualRowsContainerRef = useRef<HTMLElement | null>(null);
   const handleScrollContainerRef = useCallback((node: HTMLElement | null) => {
     scrollContainerRef.current = node;
   }, []);
   const handleContentRef = useCallback((node: HTMLElement | null) => {
     contentRef.current = node;
+  }, []);
+  const handleVirtualRowsContainerRef = useCallback((node: HTMLElement | null) => {
+    virtualRowsContainerRef.current = node;
   }, []);
   const [followOutput, setFollowOutputr] = useState(true);
   const followOutputRef = useRef(followOutput);
@@ -130,6 +163,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
   const pendingAutoScrollFrameRef = useRef<number | null>(null);
   const pendingAutoScrollTimeoutRef = useRef<number | null>(null);
   const pendingVirtualRowMeasureFramesRef = useRef(new Map<Element, number>());
+  const pendingPromptAnchorFrameRef = useRef<number | null>(null);
   const historyStartReadyRef = useRef(false);
   const shouldUseVirtualizer = segments.historyVirtualized.length > 0;
   const {
@@ -255,6 +289,126 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     scrollMessagesToBottom("auto");
     scheduleStickToBottom();
   }, [cancelPendingStickToBottom, scheduleStickToBottom, scrollMessagesToBottom]);
+
+  const virtualizedIndexById = useMemo(() => {
+    const indexById = new Map<string, number>();
+    segments.historyVirtualized.forEach((item, index) => {
+      indexById.set(item.id, index);
+    });
+    return indexById;
+  }, [segments.historyVirtualized]);
+
+  // useStableEvent, not useCallback: these close over promptAnchorIds and the
+  // virtualizer, which change on every stream flush. A changing identity would
+  // re-run the viewport-handle effect below, and its cleanup cancels pending
+  // stick-to-bottom frames — that would break autoscroll mid-stream.
+  const readPromptAnchorOffsets = useStableEvent((): MeasuredPromptAnchorOffset[] => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) {
+      return [];
+    }
+    const containerTop = scrollContainer.getBoundingClientRect().top;
+    const measuredOffsetById = new Map<string, number>();
+    for (const node of scrollContainer.querySelectorAll(`[${PROMPT_ANCHOR_ATTRIBUTE}]`)) {
+      const id = node.getAttribute(PROMPT_ANCHOR_ATTRIBUTE);
+      if (id) {
+        measuredOffsetById.set(
+          id,
+          getOffsetWithinScrollContainer({ scrollContainer, containerTop, node }),
+        );
+      }
+    }
+    const virtualRowsContainer = virtualRowsContainerRef.current;
+    const virtualRowsTop = virtualRowsContainer
+      ? getOffsetWithinScrollContainer({
+          scrollContainer,
+          containerTop,
+          node: virtualRowsContainer,
+        })
+      : 0;
+
+    return promptAnchorIds.map((id): MeasuredPromptAnchorOffset => {
+      const measured = measuredOffsetById.get(id);
+      if (measured !== undefined) {
+        return { id, offset: measured, isMeasured: true };
+      }
+      // Unmounted anchors only exist above the virtualizer's window, so the
+      // virtualizer's own measurement cache is the best estimate available.
+      const virtualizedIndex = virtualizedIndexById.get(id);
+      const virtualizedStart =
+        virtualizedIndex === undefined
+          ? undefined
+          : rowVirtualizer.measurementsCache[virtualizedIndex]?.start;
+      return {
+        id,
+        offset: virtualizedStart === undefined ? 0 : virtualRowsTop + virtualizedStart,
+        isMeasured: false,
+      };
+    });
+  });
+
+  const cancelPendingPromptAnchorCorrection = useCallback(() => {
+    const pendingFrame = pendingPromptAnchorFrameRef.current;
+    if (pendingFrame !== null) {
+      pendingPromptAnchorFrameRef.current = null;
+      window.cancelAnimationFrame(pendingFrame);
+    }
+  }, []);
+
+  const scrollToPromptAnchor = useStableEvent((anchorId: string, offset: number) => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) {
+      return;
+    }
+    cancelPendingPromptAnchorCorrection();
+
+    function applyOffset(container: HTMLElement, nextOffset: number) {
+      container.scrollTo({ top: Math.max(0, nextOffset), behavior: "auto" });
+      lastKnownScrollTopRef.current = container.scrollTop;
+      syncNearBottom(container, onNearBottomChange);
+    }
+
+    function correctAfterMeasure(container: HTMLElement, remainingPasses: number) {
+      pendingPromptAnchorFrameRef.current = window.requestAnimationFrame(() => {
+        pendingPromptAnchorFrameRef.current = null;
+        const anchor = readPromptAnchorOffsets().find((candidate) => candidate.id === anchorId);
+        if (anchor?.isMeasured && Math.abs(anchor.offset - container.scrollTop) > 1) {
+          applyOffset(container, anchor.offset);
+        }
+        if (remainingPasses > 1) {
+          correctAfterMeasure(container, remainingPasses - 1);
+        }
+      });
+    }
+
+    applyOffset(scrollContainer, offset);
+    correctAfterMeasure(scrollContainer, PROMPT_ANCHOR_CORRECTION_PASSES);
+  });
+
+  const scrollToAdjacentPrompt = useStableEvent((direction: PromptScrollDirection) => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) {
+      return;
+    }
+    const target = resolvePromptScrollTarget({
+      anchors: readPromptAnchorOffsets(),
+      scrollTop: scrollContainer.scrollTop,
+      direction,
+    });
+    if (target.kind === "none") {
+      return;
+    }
+    if (target.kind === "bottom") {
+      setFollowOutput(true);
+      forceStickToBottom();
+      return;
+    }
+    // Parking on a prompt is an explicit "stop following the live tail" — without
+    // this the next content flush would yank the viewport back to the bottom.
+    cancelPendingStickToBottom();
+    setFollowOutput(false);
+    scrollToPromptAnchor(target.id, target.offset);
+  });
 
   const updateScrollMetrics = useCallback(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -477,6 +631,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
         }
         scheduleStickToBottom();
       },
+      scrollToAdjacentPrompt,
     };
     viewportRef.current = handle;
     return () => {
@@ -484,8 +639,16 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
         viewportRef.current = null;
       }
       cancelPendingStickToBottom();
+      cancelPendingPromptAnchorCorrection();
     };
-  }, [cancelPendingStickToBottom, forceStickToBottom, scheduleStickToBottom, viewportRef]);
+  }, [
+    cancelPendingPromptAnchorCorrection,
+    cancelPendingStickToBottom,
+    forceStickToBottom,
+    scrollToAdjacentPrompt,
+    scheduleStickToBottom,
+    viewportRef,
+  ]);
 
   const contentContainerStyle = useMemo((): CSSProperties => {
     return {
@@ -569,7 +732,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       <div ref={handleContentRef} style={contentContainerStyle}>
         {historyStartSlot}
         {shouldUseVirtualizer ? (
-          <div style={virtualRowsContainerStyle}>
+          <div ref={handleVirtualRowsContainerRef} style={virtualRowsContainerStyle}>
             {virtualRows.map((virtualRow) => {
               const item = segments.historyVirtualized[virtualRow.index];
               if (!item) {

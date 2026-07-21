@@ -177,6 +177,8 @@ export const zhCN: TranslationResources = {
   agentStream: {
     empty: "开始和这个 Agent 对话...",
     scrollToBottom: "滚动到底部",
+    scrollToPreviousPrompt: "滚动到上一条消息",
+    scrollToNextPrompt: "滚动到下一条消息",
     permission: {
       plan: "Plan",
       required: "需要权限",

@@ -175,6 +175,8 @@ export const en = {
   agentStream: {
     empty: "Start chatting with this agent...",
     scrollToBottom: "Scroll to bottom",
+    scrollToPreviousPrompt: "Scroll to previous prompt",
+    scrollToNextPrompt: "Scroll to next prompt",
     permission: {
       plan: "Plan",
       required: "Permission Required",

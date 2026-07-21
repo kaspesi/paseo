@@ -6,6 +6,7 @@ import type {
   BottomAnchorLocalRequest,
   BottomAnchorRouteRequest,
 } from "./bottom-anchor-controller";
+import type { PromptScrollDirection } from "./prompt-anchor";
 
 type EdgeSlot = "header" | "footer";
 type NeighborRelation = "above" | "below";
@@ -42,6 +43,9 @@ export interface StreamEdgeSlotProps {
 export interface StreamViewportHandle {
   scrollToBottom: (reason?: BottomAnchorLocalRequest["reason"]) => void;
   prepareForViewportChange: () => void;
+  // Web only. The native stream is an inverted FlatList with no exact offset for an
+  // off-window row, so it leaves this undefined and the navigator stays web-gated.
+  scrollToAdjacentPrompt?: (direction: PromptScrollDirection) => void;
 }
 
 export interface StreamSegmentRenderers {
@@ -64,6 +68,9 @@ export interface StreamRenderInput {
   liveHeadRowRevision?: unknown;
   boundary: StreamHistoryBoundary;
   renderers: StreamSegmentRenderers;
+  // Render-order ids of the user prompts the navigator steps between. Ignored by
+  // the native strategy.
+  promptAnchorIds: string[];
   listEmptyComponent: ReactNode;
   viewportRef: RefObject<StreamViewportHandle | null>;
   routeBottomAnchorRequest: BottomAnchorRouteRequest | null;

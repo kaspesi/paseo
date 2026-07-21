@@ -26,7 +26,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MAX_CONTENT_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import { useMutation } from "@tanstack/react-query";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
-import { Check, ChevronDown, X } from "lucide-react-native";
+import { Check, ChevronDown, ChevronUp, X } from "lucide-react-native";
 import { usePanelStore } from "@/stores/panel-store";
 import {
   AssistantMessage,
@@ -72,6 +72,11 @@ import {
   type TurnContentStrategy,
 } from "./turn-footer";
 import { layoutStream, type StreamLayoutItem } from "./layout";
+import {
+  buildPromptAnchorDataSet,
+  collectPromptAnchorIds,
+  type PromptScrollDirection,
+} from "./prompt-anchor";
 import {
   type BottomAnchorLocalRequest,
   type BottomAnchorRouteRequest,
@@ -161,7 +166,14 @@ function renderStreamItemWithTurnFooter(input: {
     />
   ) : null;
   const content = (
-    <StreamItemWrapper gapBelow={input.layoutItem.gapBelow}>{input.content}</StreamItemWrapper>
+    <StreamItemWrapper
+      gapBelow={input.layoutItem.gapBelow}
+      // Only the first message of a user run is a navigator stop, so a prompt split
+      // across queued messages lands the reader on its opening message.
+      promptAnchorId={input.layoutItem.isFirstInUserGroup ? input.layoutItem.item.id : undefined}
+    >
+      {input.content}
+    </StreamItemWrapper>
   );
 
   if (input.layoutItem.frameOrder === "footer-then-content") {
@@ -618,6 +630,29 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       viewportRef.current?.scrollToBottom("jump-to-bottom");
     }, []);
 
+    const promptAnchorIds = useMemo(
+      () =>
+        collectPromptAnchorIds({
+          history: streamLayout.history,
+          liveHead: streamLayout.liveHead,
+        }),
+      [streamLayout.history, streamLayout.liveHead],
+    );
+    const scrollToAdjacentPrompt = useCallback((direction: PromptScrollDirection) => {
+      viewportRef.current?.scrollToAdjacentPrompt?.(direction);
+    }, []);
+    const scrollToPreviousPrompt = useCallback(
+      () => scrollToAdjacentPrompt("previous"),
+      [scrollToAdjacentPrompt],
+    );
+    const scrollToNextPrompt = useCallback(
+      () => scrollToAdjacentPrompt("next"),
+      [scrollToAdjacentPrompt],
+    );
+    // Only the web viewport can resolve an exact offset for an off-screen prompt,
+    // and a single prompt has nowhere to step to.
+    const showPromptNavigator = isWeb && promptAnchorIds.length >= 2;
+
     const setInlineDetailsExpanded = useCallback(
       (itemId: string, expanded: boolean) => {
         if (!streamRenderStrategy.shouldDisableParentScrollOnInlineDetailsExpansion()) {
@@ -1021,6 +1056,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               liveHeadRowRevision: expandedToolCallGroupIds,
               boundary,
               renderers,
+              promptAnchorIds,
               listEmptyComponent,
               viewportRef,
               routeBottomAnchorRequest,
@@ -1035,6 +1071,31 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
             })}
           </MessageOuterSpacingProvider>
+          {showPromptNavigator && (
+            <View style={stylesheet.promptNavigatorContainer} pointerEvents="box-none">
+              <View style={stylesheet.promptNavigator}>
+                <Pressable
+                  style={promptNavigatorButtonStyle}
+                  onPress={scrollToPreviousPrompt}
+                  accessibilityRole="button"
+                  accessibilityLabel={t("agentStream.scrollToPreviousPrompt")}
+                  testID="scroll-to-previous-prompt-button"
+                >
+                  <ChevronUp size={18} color={stylesheet.promptNavigatorIcon.color} />
+                </Pressable>
+                <View style={stylesheet.promptNavigatorDivider} />
+                <Pressable
+                  style={promptNavigatorButtonStyle}
+                  onPress={scrollToNextPrompt}
+                  accessibilityRole="button"
+                  accessibilityLabel={t("agentStream.scrollToNextPrompt")}
+                  testID="scroll-to-next-prompt-button"
+                >
+                  <ChevronDown size={18} color={stylesheet.promptNavigatorIcon.color} />
+                </Pressable>
+              </View>
+            </View>
+          )}
           {!isNearBottom && (
             <View style={stylesheet.scrollToBottomContainer} pointerEvents="box-none">
               <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
@@ -1468,6 +1529,17 @@ function PermissionRequestCard({
   );
 }
 
+// Hover/press tint only — the button's box never changes size, so the cursor can't
+// be shifted out from under itself (see docs/hover.md, failure mode 2).
+const promptNavigatorButtonStyle = ({
+  pressed,
+  hovered = false,
+}: PressableStateCallbackType & { hovered?: boolean }) => [
+  stylesheet.promptNavigatorButton,
+  hovered ? stylesheet.promptNavigatorButtonHovered : null,
+  pressed ? stylesheet.promptNavigatorButtonPressed : null,
+];
+
 const stylesheet = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
@@ -1551,6 +1623,40 @@ const stylesheet = StyleSheet.create((theme) => ({
   scrollToBottomIcon: {
     color: theme.colors.foreground,
   },
+  promptNavigatorContainer: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    right: theme.spacing[3],
+    justifyContent: "center",
+  },
+  promptNavigator: {
+    borderRadius: theme.borderRadius.full,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface2,
+    overflow: "hidden",
+    ...theme.shadow.sm,
+  },
+  promptNavigatorButton: {
+    width: 30,
+    height: 30,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  promptNavigatorButtonHovered: {
+    backgroundColor: theme.colors.surface3,
+  },
+  promptNavigatorButtonPressed: {
+    opacity: 0.7,
+  },
+  promptNavigatorDivider: {
+    height: theme.borderWidth[1],
+    backgroundColor: theme.colors.border,
+  },
+  promptNavigatorIcon: {
+    color: theme.colors.foregroundMuted,
+  },
 }));
 
 const permissionStyles = StyleSheet.create((theme) => ({
@@ -1626,13 +1732,24 @@ const permissionStyles = StyleSheet.create((theme) => ({
 
 interface StreamItemWrapperProps {
   gapBelow: number;
+  promptAnchorId?: string;
   children: ReactNode;
 }
 
-function StreamItemWrapper({ gapBelow, children }: StreamItemWrapperProps) {
+function StreamItemWrapper({ gapBelow, promptAnchorId, children }: StreamItemWrapperProps) {
   const wrapperStyle = useMemo(
     () => [stylesheet.streamItemWrapper, { marginBottom: gapBelow }],
     [gapBelow],
   );
-  return <View style={wrapperStyle}>{children}</View>;
+  // react-native-web turns this into a data attribute the web stream strategy
+  // queries to measure prompt offsets. Native ignores it.
+  const promptAnchorDataSet = useMemo(
+    () => (promptAnchorId ? buildPromptAnchorDataSet(promptAnchorId) : undefined),
+    [promptAnchorId],
+  );
+  return (
+    <View style={wrapperStyle} dataSet={promptAnchorDataSet}>
+      {children}
+    </View>
+  );
 }

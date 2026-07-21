@@ -177,6 +177,8 @@ export const ja: TranslationResources = {
   agentStream: {
     empty: "このエージェントとチャットを始めましょう...",
     scrollToBottom: "下にスクロール",
+    scrollToPreviousPrompt: "前のプロンプトへスクロール",
+    scrollToNextPrompt: "次のプロンプトへスクロール",
     permission: {
       plan: "プラン",
       required: "権限が必要です",

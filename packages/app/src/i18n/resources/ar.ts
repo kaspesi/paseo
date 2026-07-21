@@ -177,6 +177,8 @@ export const ar: TranslationResources = {
   agentStream: {
     empty: "ابدأ الدردشة مع هذا الوكيل...",
     scrollToBottom: "قم بالتمرير إلى الأسفل",
+    scrollToPreviousPrompt: "التمرير إلى الرسالة السابقة",
+    scrollToNextPrompt: "التمرير إلى الرسالة التالية",
     permission: {
       plan: "يخطط",
       required: "الإذن مطلوب",

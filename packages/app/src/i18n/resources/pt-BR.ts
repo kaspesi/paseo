@@ -177,6 +177,8 @@ export const ptBR: TranslationResources = {
   agentStream: {
     empty: "Comece a conversar com este agente...",
     scrollToBottom: "Rolar para o fim",
+    scrollToPreviousPrompt: "Rolar para a mensagem anterior",
+    scrollToNextPrompt: "Rolar para a próxima mensagem",
     permission: {
       plan: "Plano",
       required: "Permissão necessária",

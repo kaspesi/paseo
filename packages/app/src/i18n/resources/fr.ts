@@ -179,6 +179,8 @@ export const fr: TranslationResources = {
   agentStream: {
     empty: "Commencez à discuter avec cet agent...",
     scrollToBottom: "Faire défiler vers le bas",
+    scrollToPreviousPrompt: "Faire défiler vers le message précédent",
+    scrollToNextPrompt: "Faire défiler vers le message suivant",
     permission: {
       plan: "Plan",
       required: "Autorisation requise",
